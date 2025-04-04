@@ -1,7 +1,10 @@
 # FenScribe - Smart PDF Layout Optimizer
 
 Reduce printing costs by automatically detecting and removing blank spaces in PDF documents.
-![gui图片](sample.png)
+
+## Samples
+![gui图片](https://github.com/user-attachments/assets/b6c8e163-81a9-4b5d-9baa-5d8947292634)
+![up_1733669026353_1_695650](https://github.com/user-attachments/assets/9cccd0da-39c6-4cd4-909f-7bfa13cb0086)
 
 ---
 
