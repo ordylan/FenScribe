@@ -20,7 +20,7 @@ class PDFProcessorApp:
         self.config = {
             'threshold': 137,
             'blank_height': 10,
-            'min_height': 37,
+            'min_height': 10,
             'bottom_margin': 0,
             'dpi': 300,
             'template_docx': ""
@@ -81,7 +81,7 @@ class PDFProcessorApp:
 
         ttk.Label(param_frame, text="min_height:").grid(row=0, column=4, padx=5, sticky="w")
         self.min_height = ttk.Spinbox(param_frame, from_=1, to=300, width=8)
-        self.min_height.set(37)
+        self.min_height.set(10)
         self.min_height.grid(row=0, column=5, padx=5)
 
         ttk.Label(param_frame, text="blank_height:").grid(row=0, column=6, padx=5, sticky="w")
@@ -149,7 +149,7 @@ class PDFProcessorApp:
 
 欢迎: 以下是参数说明: 
 1. threshold: 判断某一行是否为空白的亮度阈值
-   将像素RGB值转为灰度(取平均值), 当整行像素的平均灰度 ≥ 该值时视为空白行
+   将像素RGB值转为灰度(取平均值), 当整行像素的平均灰度 ≤ 该值时视为空白行
 
 2. dpi: PDF转图片的分辨率  |   PS: 我们不采用智能换行排版有以下原因: 技术有限  格式错乱概率更大. 
 
