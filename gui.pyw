@@ -14,7 +14,7 @@ class PDFProcessorApp:
     def __init__(self, master):
         self.master = master
         master.title("FenScribe ~ PDF空白删")
-        master.geometry("800x800")
+        master.geometry("800x688")
 
         # 初始化配置参数
         self.config = {
@@ -139,7 +139,7 @@ class PDFProcessorApp:
         self.process_btn.pack(side="left", padx=5)
 
         ttk.Button(control_frame, text="Open Output Folder", command=self.openf).pack(side="left", padx=5)
-
+        ttk.Button(control_frame, text="DoubleColumnCut", command=self.open_double_column).pack(side="left", padx=5)
         ttk.Button(control_frame, text="Clear the log", command=self.clear_log).pack(side="left", padx=5)
 
         ttk.Button(control_frame, text="Quit", command=self.master.quit).pack(side="right", padx=5)
@@ -167,7 +167,15 @@ class PDFProcessorApp:
         - Min Height: {self.min_height.get()}
         - Blank Height: {self.blank_height.get()}
         """)
-
+    def open_double_column(self):
+        py_path = os.path.join(os.path.dirname(__file__), "DoubleColumnCut.pyw")
+        if os.path.exists(py_path):
+            try:
+                subprocess.Popen([sys.executable, py_path])
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to open: {str(e)}")
+        else:
+            messagebox.showerror("Error", "DoubleColumnCut.pyw not found!")
     def load_templates(self):
         """加载模板文件"""
         template_dir = "_Templates"
@@ -540,5 +548,5 @@ if __name__ == "__main__":
     style.configure("TButton", padding=6)
     style.configure("TEntry", padding=5)
     style.configure("TCombobox", padding=5)
-    
+    os.makedirs("__Output", exist_ok=True)
     root.mainloop()
