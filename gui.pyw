@@ -1,9 +1,10 @@
+import win32com.client
+import os
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 import threading
 import fitz  # PyMuPDF
 from PIL import Image, ImageTk
-import os
 from docx import Document
 import subprocess
 import sys
@@ -29,6 +30,7 @@ class PDFProcessorApp:
         # 创建界面组件
         self.create_widgets()
         self.load_templates()
+        self.load_macros()
 
         # 状态变量
         self.is_processing = False
@@ -100,7 +102,12 @@ class PDFProcessorApp:
         self.template_var = tk.StringVar()
         self.template_combobox = ttk.Combobox(template_frame, textvariable=self.template_var, state="readonly")
         self.template_combobox.pack(pady=5, fill="x", padx=5)
+        macro_frame = ttk.LabelFrame(main_frame, text="Step4. Select a macro (optional)")
+        macro_frame.pack(fill="x", pady=5)
 
+        self.macro_var = tk.StringVar()
+        self.macro_combobox = ttk.Combobox(macro_frame, textvariable=self.macro_var, state="readonly")
+        self.macro_combobox.pack(pady=5, fill="x", padx=5)
         # 参数测试区域
         #test_frame = ttk.LabelFrame(main_frame, text="参数测试(已坏)")
         #test_frame.pack(fill="x", pady=5)
@@ -119,6 +126,9 @@ class PDFProcessorApp:
         #self.left_image_label.pack(side="left", fill="both", expand=True, padx=5)
         #self.right_image_label = ttk.Label(img_display_frame)
         #self.right_image_label.pack(side="right", fill="both", expand=True, padx=5)
+
+
+
 
         # 进度条
         self.progress_bar = ttk.Progressbar(main_frame, orient="horizontal", mode="determinate")
@@ -193,7 +203,20 @@ class PDFProcessorApp:
                 self.log("Tip: There are no template files in the template directory, please place .docx files in the _Templates directory")
         except Exception as e:
                 self.log(f"Loading Template Error: {str(e)}")
-
+    def load_macros(self):
+        """加载宏文件"""
+        macro_dir = "_Macros"
+        try:
+            if not os.path.exists(macro_dir):
+                os.makedirs(macro_dir)
+                self.log(f"Macro directory created: {macro_dir}")
+                
+            macros = [f for f in os.listdir(macro_dir) if f.endswith('.vba')]
+            macros.insert(0, "Do not run")  # 默认选项
+            self.macro_combobox['values'] = macros
+            self.macro_var.set("Do not run")
+        except Exception as e:
+            self.log(f"Error loading macros: {str(e)}")
     def select_pdf(self):
         """选择PDF文件"""
         file_path = filedialog.askopenfilename(
@@ -482,6 +505,11 @@ class PDFProcessorApp:
                 os.makedirs(output_dira)  
             doc.save(output_docx)
             self.log(f"Processing is complete! The results have been saved to: {os.path.abspath(output_docx)}")
+            selected_macro = self.macro_var.get()
+            if selected_macro != "Do not run":
+                macro_path = os.path.join("_Macros", selected_macro)
+                self.inject_and_run_macro(output_docx, macro_path)
+
             messagebox.showinfo("Processing is complete!", f"The results have been saved to:\n{output_docx}")
 
         except Exception as e:
@@ -491,7 +519,49 @@ class PDFProcessorApp:
             self.is_processing = False
             self.master.after(0, lambda: self.process_btn.config(state="normal"))
             self.update_progress(0)
-
+    def inject_and_run_macro(self, docx_path, macro_path):
+        """注入并运行选定的宏"""
+        try:
+            # 读取宏代码
+            with open(macro_path, 'r', encoding='utf-8') as f:
+                vba_code = f.read()
+            
+            # 获取宏名称（假设文件名不带扩展名是宏名称）
+            #macro_name = os.path.splitext(os.path.basename(macro_path))[0]
+            macro_name = 'FenScribeMacro'
+            # 启动Word应用
+            word = win32com.client.Dispatch("Word.Application")
+            word.Visible = False  # 后台运行
+            try:
+            # 打开文档
+                doc = word.Documents.Open(os.path.abspath(docx_path))
+            
+            # 注入宏到临时模块
+                vba_project = doc.VBProject
+                new_module = vba_project.VBComponents.Add(1)  # 1 表示标准模块
+                new_module.CodeModule.AddFromString(vba_code)
+                
+                # 运行宏
+                try:
+                    word.Application.Run(macro_name)
+                except Exception as e:
+                    self.log(f"Error running macro: {e}")
+                
+                # 保存并关闭（覆盖原文件，不保留宏）
+                doc.SaveAs2(
+                    FileName=os.path.abspath(docx_path),
+                    FileFormat=12,  # wdFormatXMLDocument
+                    AddToRecentFiles=False
+                )
+            finally:
+                doc.Close(SaveChanges=False)
+                word.Quit()
+            self.log(f"Macro executed and document saved: {docx_path}")
+        except Exception as e:
+            if -2146822220 in e.args:
+                self.log("Please enable VBA project access in Word: File → Options → Trust Center → Trust Center Settings → Macro Settings → Trust access to the VBA project object model")
+            else:
+                self.log(f"Error injecting macro: {e}")
     def update_progress(self, value):
         """更新进度条"""
         self.progress_bar["value"] = value
