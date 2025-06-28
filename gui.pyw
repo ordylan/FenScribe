@@ -19,7 +19,7 @@ class PDFProcessorApp:
 
         # 初始化配置参数
         self.config = {
-            'threshold': 137,
+            'threshold': 200,
             'blank_height': 10,
             'min_height': 10,
             'bottom_margin': 0,
@@ -72,7 +72,7 @@ class PDFProcessorApp:
 
         ttk.Label(param_frame, text="Blank threshold (20-255):").grid(row=0, column=0, padx=5, sticky="w")
         self.threshold = ttk.Spinbox(param_frame, from_=20, to=255, width=8)
-        self.threshold.set(137)
+        self.threshold.set(200)
         self.threshold.grid(row=0, column=1, padx=5)
 
         ttk.Label(param_frame, text="DPI (72-600):").grid(row=0, column=2, padx=5, sticky="w")
@@ -156,12 +156,13 @@ class PDFProcessorApp:
         self.log(f"""
 注意: 请先手动裁边pdf哦哦! pdf扫描版需要矫正角度; 多栏pdf请分成单栏进行切割哦! 
 这是第三代代码 已经支持gui操作!  图标暂时与程序无关 只是放一下
+宏代码bug较多  暂时不要使用
 
 欢迎: 以下是参数说明: 
-1. threshold: 判断某一行是否为空白的亮度阈值
-   将像素RGB值转为灰度(取平均值), 当整行像素的平均灰度 ≤ 该值时视为空白行
+1. threshold: 判断某一行是否为空白的亮度阈值 [即越大被误删概率越低]
+   将像素RGB值转为灰度(取平均值), 当整行像素的平均灰度 ≥ 该值时视为空白行 
 
-2. dpi: PDF转图片的分辨率  |   PS: 我们不采用智能换行排版有以下原因: 技术有限  格式错乱概率更大. 
+2. dpi: PDF转图片的分辨率  |   PS: 我们不采用智能换行排版有以下原因: 技术有限 格式错乱概率更大. 
 
 3. min_height: 有效内容过滤阈值
    切割后的段落高度 ≥ 该值才会被保留, 否则视为无效内容
