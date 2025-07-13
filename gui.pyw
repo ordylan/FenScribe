@@ -17,7 +17,7 @@ class PDFProcessorApp:
         master.title("FenScribe ~ PDF空白删")
         master.geometry("800x688")
 
-        # 初始化配置参数
+        # 初始化配置参数  已取消  无用
         self.config = {
             'threshold': 200,
             'blank_height': 10,
@@ -156,7 +156,6 @@ class PDFProcessorApp:
         self.log(f"""
 注意: 请先手动裁边pdf哦哦! pdf扫描版需要矫正角度; 多栏pdf请分成单栏进行切割哦! 
 这是第三代代码 已经支持gui操作!  图标暂时与程序无关 只是放一下
-宏代码bug较多  暂时不要使用
 
 欢迎: 以下是参数说明: 
 1. threshold: 判断某一行是否为空白的亮度阈值 [即越大被误删概率越低]
@@ -169,15 +168,17 @@ class PDFProcessorApp:
 
 4. blank_height: 识别段落分隔的基准线
    当连续空白行数 ≥ 该值时, 认为前后内容属于不同段落
+
+注: 宏功能会关闭已打开的word 注意保存工作! (暂未修复)
 """)
 
-        self.log(f"""
-        测试输出默认参数:
-        - Threshold: {self.threshold.get()}
-        - DPI: {self.dpi.get()}
-        - Min Height: {self.min_height.get()}
-        - Blank Height: {self.blank_height.get()}
-        """)
+   #     self.log(f"""
+    #    测试输出默认参数:
+    #    - Threshold: {self.threshold.get()}
+   #     - DPI: {self.dpi.get()}
+   #     - Min Height: {self.min_height.get()}
+    #    - Blank Height: {self.blank_height.get()}
+    #    """)
     def open_double_column(self):
         py_path = os.path.join(os.path.dirname(__file__), "DoubleColumnCut.pyw")
         if os.path.exists(py_path):
@@ -523,6 +524,8 @@ class PDFProcessorApp:
     def inject_and_run_macro(self, docx_path, macro_path):
         """注入并运行选定的宏"""
         try:
+            import pythoncom
+            pythoncom.CoInitialize()
             # 读取宏代码
             with open(macro_path, 'r', encoding='utf-8') as f:
                 vba_code = f.read()
@@ -563,6 +566,11 @@ class PDFProcessorApp:
                 self.log("Please enable VBA project access in Word: File → Options → Trust Center → Trust Center Settings → Macro Settings → Trust access to the VBA project object model")
             else:
                 self.log(f"Error injecting macro: {e}")
+        finally:
+            try:
+                pythoncom.CoUninitialize()
+            except:
+                pass
     def update_progress(self, value):
         """更新进度条"""
         self.progress_bar["value"] = value
