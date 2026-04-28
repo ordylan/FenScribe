@@ -3,13 +3,14 @@ import os
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 import threading
+import shutil
 import fitz  # PyMuPDF
 from PIL import Image, ImageTk
 from docx import Document
 import subprocess
 import sys
 from tkinterdnd2 import TkinterDnD, DND_FILES 
-
+import ctypes
 
 class PDFProcessorApp:
     def __init__(self, master):
@@ -24,6 +25,9 @@ class PDFProcessorApp:
             'min_height': 10,
             'bottom_margin': 0,
             'dpi': 300,
+            # 左右阈值检测：仅用于空白行检测（不改变实际裁切图片）
+            'lr_threshold_enabled': False,
+            'lr_threshold_percent': 8,
             'template_docx': ""
         }
 
@@ -47,11 +51,12 @@ class PDFProcessorApp:
             messagebox.showerror("Error", "Only one PDF file can be dragged and dropped at a time")
             return
         file_path = files[0].strip()
-        if file_path.lower().endswith('.pdf'):
+        # accept PDF, image files, or directories containing images
+        if os.path.isdir(file_path) or file_path.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.gif')):
             self.pdf_path.set(file_path)
-            self.log(f"Selected file: {file_path}")
+            self.log(f"Selected file/folder: {file_path}")
         else:
-            messagebox.showerror("Error", "The file path should end with .pdf")
+            messagebox.showerror("Error", "Please drop a PDF, image, or folder containing images")
 
     def create_widgets(self):
         # 主容器
@@ -64,7 +69,10 @@ class PDFProcessorApp:
 
         self.pdf_path = tk.StringVar()
         ttk.Entry(file_frame, textvariable=self.pdf_path, width=60).pack(side="left", padx=5, fill="x", expand=True)
-        ttk.Button(file_frame, text="Browse...", command=self.select_pdf).pack(side="right", padx=5)
+        btn_frame = ttk.Frame(file_frame)
+        btn_frame.pack(side="right", padx=5)
+        ttk.Button(btn_frame, text="Browse...", command=self.select_pdf).pack(side="left")
+        ttk.Button(btn_frame, text="Browse Folder...", command=self.select_folder).pack(side="left", padx=(5,0))
 
         # 参数设置区域
         param_frame = ttk.LabelFrame(main_frame, text="Step2. Set the processing parameters")
@@ -90,6 +98,26 @@ class PDFProcessorApp:
         self.blank_height = ttk.Spinbox(param_frame, from_=1, to=300, width=8)
         self.blank_height.set(10)
         self.blank_height.grid(row=0, column=7, padx=5)
+
+        # Advanced (hidden) options toggle
+        self.advanced_visible = False
+        self.lr_enabled_var = tk.BooleanVar(value=False)  # 启用 左右阈值
+        self.lr_percent_var = tk.IntVar(value=8)  # 默认左右各8%
+
+        self.advanced_btn = ttk.Button(param_frame, text="Advanced ▶", command=self.toggle_advanced)
+        self.advanced_btn.grid(row=1, column=0, padx=5, pady=5, sticky='w')
+
+        # advanced frame (initially hidden)
+        self.advanced_frame = ttk.Frame(param_frame)
+        ttk.Checkbutton(self.advanced_frame, text="启用 左右阈值", variable=self.lr_enabled_var).grid(row=0, column=0, sticky='w', padx=5)
+        ttk.Label(self.advanced_frame, text="左右各 (%)").grid(row=0, column=1, sticky='w')
+        self.lr_spinbox = ttk.Spinbox(self.advanced_frame, from_=0, to=49, width=8, textvariable=self.lr_percent_var)
+        self.lr_spinbox.grid(row=0, column=2, padx=5)
+        ttk.Label(self.advanced_frame, text="注: 仅影响空白行识别，不影响裁切输出").grid(row=1, column=0, columnspan=3, sticky='w', padx=5)
+        # 不插入 Word 选项
+        self.no_insert_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self.advanced_frame, text="不插入 Word（仅保存图片）", variable=self.no_insert_var).grid(row=2, column=0, columnspan=3, sticky='w', padx=5, pady=(4,0))
+        
 
 
 
@@ -154,21 +182,20 @@ class PDFProcessorApp:
 
         ttk.Button(control_frame, text="Quit", command=self.master.quit).pack(side="right", padx=5)
         self.log(f"""
-注意: 请先手动裁边pdf哦哦! pdf扫描版需要矫正角度; 多栏pdf请分成单栏进行切割哦! 
-这是第三代代码 已经支持gui操作!  图标暂时与程序无关 只是放一下
-
+Welcome to FenScribe!!    https://ordylan.com/FenScribe
 欢迎: 以下是参数说明: 
 1. threshold: 判断某一行是否为空白的亮度阈值 [即越大被误删概率越低]
    将像素RGB值转为灰度(取平均值), 当整行像素的平均灰度 ≥ 该值时视为空白行 
 
-2. dpi: PDF转图片的分辨率  |   PS: 我们不采用智能换行排版有以下原因: 技术有限 格式错乱概率更大. 
+2. dpi: PDF转图片的分辨率  |   PS: 不采用跨行排版原因: 技术有限 格式错乱概率更大. 
 
 3. min_height: 有效内容过滤阈值
    切割后的段落高度 ≥ 该值才会被保留, 否则视为无效内容
 
 4. blank_height: 识别段落分隔的基准线
    当连续空白行数 ≥ 该值时, 认为前后内容属于不同段落
-
+注意: 请先手动裁边pdf哦哦! pdf扫描版需要矫正角度; 多栏pdf请分成单栏进行切割(下有工具)哦! 
+这是第三代代码 已经支持gui操作!  
 注: 宏功能会关闭已打开的word 注意保存工作! (暂未修复)
 """)
 
@@ -222,11 +249,18 @@ class PDFProcessorApp:
     def select_pdf(self):
         """选择PDF文件"""
         file_path = filedialog.askopenfilename(
-            filetypes=[("PDF file", "*.pdf"), ("All files", "*.*")]
+            filetypes=[("PDF file", "*.pdf"), ("Image files", "*.png;*.jpg;*.jpeg;*.tif;*.tiff;*.bmp;*.gif"), ("All files", "*.*")]
         )
         if file_path:
             self.pdf_path.set(file_path)
             self.log(f"Selected file: {file_path}")
+
+    def select_folder(self):
+        """选择包含图片的文件夹"""
+        folder = filedialog.askdirectory()
+        if folder:
+            self.pdf_path.set(folder)
+            self.log(f"Selected folder: {folder}")
 
     def log(self, message, tag=None):
         """记录日志信息"""
@@ -245,13 +279,23 @@ class PDFProcessorApp:
     def validate_inputs(self):
         """验证输入参数"""
         try:
-            if not self.pdf_path.get().endswith('.pdf'):
-                raise ValueError("需要加上.pdf后缀名啊啊啊啊")
+            path = self.pdf_path.get()
+            if not path:
+                raise ValueError("请选择一个 PDF、图片或包含图片的文件夹")
+            # accept folder, image files, or pdf
+            if not (os.path.isdir(path) or path.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.gif'))):
+                raise ValueError("请选择 PDF、图片文件，或包含图片的文件夹")
 
+            # template may be missing
+            template_name = self.template_var.get() if hasattr(self, 'template_var') else ''
+            template_path = os.path.join("_Templates", template_name) if template_name else ''
             self.config.update({
                 'threshold': int(self.threshold.get()),
                 'dpi': int(self.dpi.get()),
-                'template_docx': os.path.join("_Templates", self.template_var.get())
+                'template_docx': template_path,
+                'lr_threshold_enabled': bool(self.lr_enabled_var.get()),
+                'lr_threshold_percent': int(self.lr_percent_var.get()),
+                'no_insert_word': bool(self.no_insert_var.get())
             })
 
             if not (20 <= self.config['threshold'] <= 255):
@@ -264,6 +308,17 @@ class PDFProcessorApp:
             self.log(f"Input Error: {str(e)}", "error")
             messagebox.showerror("Input Error", str(e))
             return False
+
+    def toggle_advanced(self):
+        """显示或隐藏高级选项面板"""
+        if getattr(self, 'advanced_visible', False):
+            self.advanced_frame.grid_forget()
+            self.advanced_visible = False
+            self.advanced_btn.config(text="Advanced ▶")
+        else:
+            self.advanced_frame.grid(row=1, column=0, columnspan=8, pady=(5,0), sticky="w")
+            self.advanced_visible = True
+            self.advanced_btn.config(text="Advanced ▼")
 
     def start_processing(self):
         """启动处理线程"""
@@ -432,8 +487,26 @@ class PDFProcessorApp:
         blanks = 0
         blank_height = self.config['blank_height']
 
+        # 获取当前左右阈值设置（优先使用UI变量，回退到config）
+        try:
+            lr_enabled = bool(self.lr_enabled_var.get())
+            lr_percent = int(self.lr_percent_var.get())
+        except Exception:
+            lr_enabled = bool(self.config.get('lr_threshold_enabled', False))
+            lr_percent = int(self.config.get('lr_threshold_percent', 8))
+
         for y in range(height):
-            row = [pixels[y * width + x] for x in range(width)]
+            # 根据左右阈值决定检测时使用的水平范围（仅影响空白检测，不改变像素数据或输出）
+            if lr_enabled and lr_percent > 0:
+                left_cut = int(width * (lr_percent / 100.0))
+                right_cut = width - left_cut
+                if left_cut >= right_cut:
+                    row = [pixels[y * width + x] for x in range(width)]
+                else:
+                    row = [pixels[y * width + x] for x in range(left_cut, right_cut)]
+            else:
+                row = [pixels[y * width + x] for x in range(width)]
+
             if self.is_blank(row):
                 blanks += 1
                 if start is not None and blanks > blank_height:
@@ -452,9 +525,47 @@ class PDFProcessorApp:
     def pdf_to_imgs(self, pdf_path, output_dir):
         """将PDF转换为图片"""
         try:
-            pdf_doc = fitz.open(pdf_path)
             img_paths = []
-            
+
+            # If input is a directory, collect image files and copy them into output_dir
+            if os.path.isdir(pdf_path):
+                files = sorted(os.listdir(pdf_path))
+                image_exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.gif')
+                imgs = [f for f in files if f.lower().endswith(image_exts)]
+                if not imgs:
+                    self.log("No image files found in the selected folder", "error")
+                    return []
+                for i, name in enumerate(imgs):
+                    src = os.path.join(pdf_path, name)
+                    dst = os.path.join(output_dir, f"page_{i+1}" + os.path.splitext(name)[1])
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception:
+                        # fallback: try open and save via PIL
+                        try:
+                            Image.open(src).save(dst)
+                        except Exception as e:
+                            self.log(f"Failed to copy/convert image: {src} -> {e}", "error")
+                            continue
+                    img_paths.append(dst)
+                    self.log(f"Collected image {i+1}/{len(imgs)}: {dst}")
+                    self.update_progress((i+1)/len(imgs)*50)
+                return img_paths
+
+            # If input is a single image file, copy it into output_dir
+            if pdf_path.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.gif')):
+                try:
+                    name = os.path.basename(pdf_path)
+                    dst = os.path.join(output_dir, name)
+                    shutil.copy2(pdf_path, dst)
+                    self.log(f"Collected single image: {dst}")
+                    return [dst]
+                except Exception as e:
+                    self.log(f"Failed to copy image file: {e}", "error")
+                    return []
+
+            # Otherwise assume PDF and convert pages
+            pdf_doc = fitz.open(pdf_path)
             for page_num in range(len(pdf_doc)):
                 page = pdf_doc.load_page(page_num)
                 pix = page.get_pixmap(dpi=self.config['dpi'])
@@ -463,10 +574,10 @@ class PDFProcessorApp:
                 img_paths.append(output_path)
                 self.log(f"Pages converted {page_num+1}/{len(pdf_doc)}")
                 self.update_progress((page_num+1)/len(pdf_doc)*50)
-                
+
             return img_paths
         except Exception as e:
-            self.log(f"Error while converting PDF: {str(e)}", "error")
+            self.log(f"Error while converting/collecting images: {str(e)}", "error")
             return []
 
     def process_pdf(self):
@@ -479,12 +590,13 @@ class PDFProcessorApp:
             os.makedirs(output_dir, exist_ok=True)
             self.log(f"A temporary directory is created: {output_dir}")
 
-            doc = Document(self.config['template_docx'])
-            total_pages = len(fitz.open(pdf_path))
+            # prepare output document
+            doc = Document(self.config['template_docx']) if self.config.get('template_docx') else Document()
             segment_counter = 1
 
-            self.log("Start converting PDF to image...")
+            self.log("Start converting/collecting images...")
             img_paths = self.pdf_to_imgs(pdf_path, output_dir)
+            total_pages = len(img_paths)
             if not img_paths:
                 raise ValueError("PDF converting error")
 
@@ -494,8 +606,11 @@ class PDFProcessorApp:
                 segments, segment_counter = self.save_segments(img_path, output_dir, segment_counter)
                 
                 for seg_path in segments:
-                    doc.add_picture(seg_path)
-                    self.log(f"Documents Inserted: {seg_path}")
+                    if not self.config.get('no_insert_word', False):
+                        doc.add_picture(seg_path)
+                        self.log(f"Documents Inserted: {seg_path}")
+                    else:
+                        self.log(f"Skipped inserting into Word (saved image): {seg_path}")
                 
                 os.remove(img_path)
                 self.log(f"Deleted Temporary Files: {img_path}")
@@ -505,14 +620,18 @@ class PDFProcessorApp:
             output_dira = os.path.join(os.path.dirname(os.path.abspath(__file__)), "__Output")
             if not os.path.exists(output_dira):
                 os.makedirs(output_dira)  
-            doc.save(output_docx)
-            self.log(f"Processing is complete! The results have been saved to: {os.path.abspath(output_docx)}")
-            selected_macro = self.macro_var.get()
-            if selected_macro != "Do not run":
-                macro_path = os.path.join("_Macros", selected_macro)
-                self.inject_and_run_macro(output_docx, macro_path)
+            if not self.config.get('no_insert_word', False):
+                doc.save(output_docx)
+                self.log(f"Processing is complete! The results have been saved to: {os.path.abspath(output_docx)}")
+                selected_macro = self.macro_var.get()
+                if selected_macro != "Do not run":
+                    macro_path = os.path.join("_Macros", selected_macro)
+                    self.inject_and_run_macro(output_docx, macro_path)
 
-            messagebox.showinfo("Processing is complete!", f"The results have been saved to:\n{output_docx}")
+                messagebox.showinfo("Processing is complete!", f"The results have been saved to:\n{output_docx}")
+            else:
+                self.log("Processing is complete! Images were saved to the temp folder; Word insertion was skipped by configuration.")
+                messagebox.showinfo("Processing is complete!", "Images saved; Word insertion skipped as requested.")
 
         except Exception as e:
             self.log(f"Processing Failure: {str(e)}", "error")
@@ -611,6 +730,8 @@ if __name__ == "__main__":
     app = PDFProcessorApp(root)
     try:
         root.iconbitmap('icon.ico')
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.ordylan.fenscribe")
+        root.wm_iconbitmap('icon.ico')
     except Exception as e:
         print("Error loading icon:", e)
 
