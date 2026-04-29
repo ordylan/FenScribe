@@ -7,10 +7,14 @@ import shutil
 import fitz  # PyMuPDF
 from PIL import Image, ImageTk
 from docx import Document
+from docx.shared import Inches
+from docx.oxml.ns import qn
+import io
 import subprocess
 import sys
 from tkinterdnd2 import TkinterDnD, DND_FILES 
 import ctypes
+import time
 
 class PDFProcessorApp:
     def __init__(self, master):
@@ -39,6 +43,11 @@ class PDFProcessorApp:
         # 状态变量
         self.is_processing = False
         self.progress = 0
+        # progress update throttling
+        self._last_progress_update = 0
+        self._pending_progress = None
+        self._progress_flush_scheduled = False
+        self._progress_throttle_seconds = 5
 
        # 绑定拖放事件
         self.master.drop_target_register(DND_FILES)  
@@ -103,6 +112,7 @@ class PDFProcessorApp:
         self.advanced_visible = False
         self.lr_enabled_var = tk.BooleanVar(value=False)  # 启用 左右阈值
         self.lr_percent_var = tk.IntVar(value=8)  # 默认左右各8%
+        self.enable_log_var = tk.BooleanVar(value=False)  # 默认不显示日志
 
         self.advanced_btn = ttk.Button(param_frame, text="Advanced ▶", command=self.toggle_advanced)
         self.advanced_btn.grid(row=1, column=0, padx=5, pady=5, sticky='w')
@@ -117,6 +127,8 @@ class PDFProcessorApp:
         # 不插入 Word 选项
         self.no_insert_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(self.advanced_frame, text="不插入 Word（仅保存图片）", variable=self.no_insert_var).grid(row=2, column=0, columnspan=3, sticky='w', padx=5, pady=(4,0))
+        # 显示/隐藏日志（默认不显示）
+        ttk.Checkbutton(self.advanced_frame, text="显示日志 (高级)", variable=self.enable_log_var, command=self._toggle_log_frame).grid(row=3, column=0, columnspan=3, sticky='w', padx=5, pady=(4,0))
         
 
 
@@ -162,26 +174,28 @@ class PDFProcessorApp:
         self.progress_bar = ttk.Progressbar(main_frame, orient="horizontal", mode="determinate")
         self.progress_bar.pack(fill="x", pady=5)
 
-        # 日志区域
-        log_frame = ttk.LabelFrame(main_frame, text="Process logs")
-        log_frame.pack(fill="both", expand=True, pady=5)
+        # 日志区域（默认不显示，只有在高级里打开）
+        self.log_frame = ttk.LabelFrame(main_frame, text="Process logs")
+        # don't pack log_frame by default; it will be packed when enabled via advanced
 
-        self.log_area = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, height=6)
+        self.log_area = scrolledtext.ScrolledText(self.log_frame, wrap=tk.WORD, height=6)
         self.log_area.pack(fill="both", expand=True)
 
         # 控制按钮
-        control_frame = ttk.Frame(main_frame)
-        control_frame.pack(pady=10)
+        self.control_frame = ttk.Frame(main_frame)
+        self.control_frame.pack(pady=10)
 
-        self.process_btn = ttk.Button(control_frame, text="Start processing", command=self.start_processing)
+        self.process_btn = ttk.Button(self.control_frame, text="Start processing", command=self.start_processing)
         self.process_btn.pack(side="left", padx=5)
 
-        ttk.Button(control_frame, text="Open Output Folder", command=self.openf).pack(side="left", padx=5)
-        ttk.Button(control_frame, text="DoubleColumnCut", command=self.open_double_column).pack(side="left", padx=5)
-        ttk.Button(control_frame, text="Clear the log", command=self.clear_log).pack(side="left", padx=5)
+        ttk.Button(self.control_frame, text="Open Output Folder", command=self.openf).pack(side="left", padx=5)
+        ttk.Button(self.control_frame, text="DoubleColumnCut", command=self.open_double_column).pack(side="left", padx=5)
+        ttk.Button(self.control_frame, text="Clear the log", command=self.clear_log).pack(side="left", padx=5)
 
-        ttk.Button(control_frame, text="Quit", command=self.master.quit).pack(side="right", padx=5)
-        self.log(f"""
+        ttk.Button(self.control_frame, text="Quit", command=self.master.quit).pack(side="right", padx=5)
+
+        # Welcome text: only log if logs are enabled
+        welcome_text = """
 Welcome to FenScribe!!    https://ordylan.com/FenScribe
 欢迎: 以下是参数说明: 
 1. threshold: 判断某一行是否为空白的亮度阈值 [即越大被误删概率越低]
@@ -197,7 +211,9 @@ Welcome to FenScribe!!    https://ordylan.com/FenScribe
 注意: 请先手动裁边pdf哦哦! pdf扫描版需要矫正角度; 多栏pdf请分成单栏进行切割(下有工具)哦! 
 这是第三代代码 已经支持gui操作!  
 注: 宏功能会关闭已打开的word 注意保存工作! (暂未修复)
-""")
+"""
+        if self.enable_log_var.get():
+            self.log(welcome_text)
 
    #     self.log(f"""
     #    测试输出默认参数:
@@ -264,11 +280,31 @@ Welcome to FenScribe!!    https://ordylan.com/FenScribe
 
     def log(self, message, tag=None):
         """记录日志信息"""
-        self.log_area.configure(state="normal")
-        self.log_area.insert("end", message + "\n", tag)
-        self.log_area.configure(state="disabled")
-        self.log_area.see("end")
-        self.master.update_idletasks()
+        # Respect default-off logging. Allow forced logs by passing tag="force" if needed.
+        try:
+            enabled = bool(getattr(self, 'enable_log_var', tk.BooleanVar(value=False)).get())
+        except Exception:
+            enabled = False
+        if not enabled:
+            return
+
+        # Ensure UI updates happen on the main thread
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.master.after(0, lambda: self.log(message, tag))
+            except Exception:
+                pass
+            return
+
+        try:
+            self.log_area.configure(state="normal")
+            self.log_area.insert("end", message + "\n", tag)
+            self.log_area.configure(state="disabled")
+            self.log_area.see("end")
+            self.master.update_idletasks()
+        except Exception:
+            # If log_area is not available or another UI error occurs, ignore to avoid crashing background processing
+            pass
 
     def clear_log(self):
         """清空日志"""
@@ -319,6 +355,23 @@ Welcome to FenScribe!!    https://ordylan.com/FenScribe
             self.advanced_frame.grid(row=1, column=0, columnspan=8, pady=(5,0), sticky="w")
             self.advanced_visible = True
             self.advanced_btn.config(text="Advanced ▼")
+
+    def _toggle_log_frame(self):
+        """Pack or forget the log frame when user toggles logging in Advanced options."""
+        try:
+            if getattr(self, 'enable_log_var', tk.BooleanVar(value=False)).get():
+                # insert log frame before control_frame to preserve layout
+                try:
+                    self.log_frame.pack(fill="both", expand=True, pady=5, before=self.control_frame)
+                except Exception:
+                    self.log_frame.pack(fill="both", expand=True, pady=5)
+            else:
+                try:
+                    self.log_frame.pack_forget()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def start_processing(self):
         """启动处理线程"""
@@ -549,7 +602,8 @@ Welcome to FenScribe!!    https://ordylan.com/FenScribe
                             continue
                     img_paths.append(dst)
                     self.log(f"Collected image {i+1}/{len(imgs)}: {dst}")
-                    self.update_progress((i+1)/len(imgs)*50)
+                    # Map conversion progress to 0-30%
+                    self.update_progress((i+1)/len(imgs)*30)
                 return img_paths
 
             # If input is a single image file, copy it into output_dir
@@ -559,6 +613,8 @@ Welcome to FenScribe!!    https://ordylan.com/FenScribe
                     dst = os.path.join(output_dir, name)
                     shutil.copy2(pdf_path, dst)
                     self.log(f"Collected single image: {dst}")
+                    # single image collection counts as conversion completion -> 30%
+                    self.update_progress(30)
                     return [dst]
                 except Exception as e:
                     self.log(f"Failed to copy image file: {e}", "error")
@@ -573,7 +629,8 @@ Welcome to FenScribe!!    https://ordylan.com/FenScribe
                 pix.save(output_path)
                 img_paths.append(output_path)
                 self.log(f"Pages converted {page_num+1}/{len(pdf_doc)}")
-                self.update_progress((page_num+1)/len(pdf_doc)*50)
+                # Map conversion progress to 0-30%
+                self.update_progress((page_num+1)/len(pdf_doc)*30)
 
             return img_paths
         except Exception as e:
@@ -600,21 +657,49 @@ Welcome to FenScribe!!    https://ordylan.com/FenScribe
             if not img_paths:
                 raise ValueError("PDF converting error")
 
+            # We'll collect all segment image paths first, then optionally insert into Word in one batch.
+            all_segments = []
+
             self.log("Start splitting the picture paragraph...")
+            # Update progress weighting: conversion 30%, splitting 50%, insertion 20%
+            # Conversion already updated during pdf_to_imgs to use up to 30%.
             for idx, img_path in enumerate(img_paths):
                 self.log(f"Processing the picture {idx+1}/{len(img_paths)}: {img_path}")
                 segments, segment_counter = self.save_segments(img_path, output_dir, segment_counter)
-                
+                all_segments.extend(segments)
+
+                # Log saved segments; avoid calling doc.add_picture per segment to improve performance
                 for seg_path in segments:
-                    if not self.config.get('no_insert_word', False):
-                        doc.add_picture(seg_path)
-                        self.log(f"Documents Inserted: {seg_path}")
+                    #self.log(f"Saved segment (deferred insert): {seg_path}")
+                    pass
+
+                try:
+                    os.remove(img_path)
+                    self.log(f"Deleted Temporary Files: {img_path}")
+                except Exception:
+                    pass
+
+                # update splitting progress portion (30%->80% total). splitting progress maps to next 50%.
+                self.update_progress(30 + (idx+1)/len(img_paths)*50)
+
+            # Insert images into Word in one batch (20% of progress)
+            if not self.config.get('no_insert_word', False):
+                self.log("Start inserting all saved segments into the Word document...")
+                total_segments = len(all_segments)
+                for i, seg_path in enumerate(all_segments):
+                    try:
+                        self._insert_image_fit_width(doc, seg_path)
+                        #self.log(f"Documents Inserted: {seg_path}")
+                    except Exception as e:
+                        self.log(f"Failed to insert {seg_path}: {e}", "error")
+
+                    # update insertion progress (final 20%)
+                    if total_segments:
+                        self.update_progress(80 + (i+1)/total_segments*20)
                     else:
-                        self.log(f"Skipped inserting into Word (saved image): {seg_path}")
-                
-                os.remove(img_path)
-                self.log(f"Deleted Temporary Files: {img_path}")
-                self.update_progress(50 + (idx+1)/len(img_paths)*50)
+                        self.update_progress(100)
+            else:
+                self.log("Skipped inserting into Word (saved images): all segments kept in temp folder")
 
             output_docx = f"__Output/output_{base_name}.docx"
             output_dira = os.path.join(os.path.dirname(os.path.abspath(__file__)), "__Output")
@@ -692,8 +777,41 @@ Welcome to FenScribe!!    https://ordylan.com/FenScribe
                 pass
     def update_progress(self, value):
         """更新进度条"""
-        self.progress_bar["value"] = value
-        self.master.update_idletasks()
+        # Ensure UI update happens on main thread; schedule if called from worker thread
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.master.after(0, lambda v=value: self.update_progress(v))
+            except Exception:
+                pass
+            return
+
+        now = time.time()
+
+        # Force immediate update for start(0) or finish(100)
+        if value == 0 or value >= 100 or (now - getattr(self, '_last_progress_update', 0)) >= getattr(self, '_progress_throttle_seconds', 5):
+            try:
+                self.progress_bar["value"] = value
+                self.master.update_idletasks()
+            except Exception:
+                pass
+            self._last_progress_update = now
+            self._pending_progress = None
+            return
+
+        # Otherwise, debounce and store pending value
+        self._pending_progress = value
+        if not getattr(self, '_progress_flush_scheduled', False):
+            self._progress_flush_scheduled = True
+            remaining = int(max(0, (self._progress_throttle_seconds - (now - self._last_progress_update))) * 1000)
+            try:
+                self.master.after(remaining, self._flush_progress_update)
+            except Exception:
+                # fallback: set immediately
+                try:
+                    self.progress_bar["value"] = value
+                    self.master.update_idletasks()
+                except Exception:
+                    pass
 
     def save_segments(self, image_path, output_dir, counter):
         """保存分割后的图片片段"""
@@ -717,13 +835,95 @@ Welcome to FenScribe!!    https://ordylan.com/FenScribe
                     output_path = os.path.join(output_dir, f"segment_{counter}.png")
                     segment_img.save(output_path, dpi=(self.config['dpi'], self.config['dpi']))
                     segment_paths.append(output_path)
-                    self.log(f"Saved segment:  {output_path}")
+                    #self.log(f"Saved segment:  {output_path}")
                     counter += 1
 
             return segment_paths, counter
         except Exception as e:
             self.log(f"Image Processing Error: {str(e)}", "error")
             return [], counter
+
+    def _flush_progress_update(self):
+        """Flush pending progress to the UI (called from main thread)."""
+        try:
+            self._progress_flush_scheduled = False
+            if getattr(self, '_pending_progress', None) is not None:
+                val = self._pending_progress
+                self._pending_progress = None
+                try:
+                    self.progress_bar["value"] = val
+                    self.master.update_idletasks()
+                except Exception:
+                    pass
+                self._last_progress_update = time.time()
+        except Exception:
+            pass
+
+    def _insert_image_fit_width(self, doc, img_path):
+        """Insert an image into `doc` scaled to the document's page width (margins considered)."""
+        # Get page width and margins from section
+        section = doc.sections[0]
+        page_width = section.page_width
+        left_margin = section.left_margin
+        right_margin = section.right_margin
+
+        # available width in EMU
+        available_width = page_width - left_margin - right_margin
+
+        # Try to detect multi-column layout and reduce available width accordingly
+        try:
+            sectPr = section._sectPr
+            cols_elem = sectPr.xpath('./w:cols')
+            col_count = None
+            col_space = 0
+            if cols_elem:
+                # first try attribute w:num
+                num_attr = cols_elem[0].get(qn('w:num'))
+                if num_attr:
+                    try:
+                        col_count = int(num_attr)
+                    except Exception:
+                        col_count = None
+                # fallback to explicit <w:col> elements
+                if col_count is None:
+                    col_elems = cols_elem[0].xpath('./w:col')
+                    if col_elems:
+                        col_count = len(col_elems)
+                # try to read gap/space attribute (may be absent)
+                space_attr = cols_elem[0].get(qn('w:space'))
+                if space_attr:
+                    try:
+                        col_space = int(space_attr)
+                    except Exception:
+                        col_space = 0
+
+            if col_count and col_count > 1:
+                # approximate per-column available width (subtract gaps evenly)
+                # col_space is in twips/EMU-like units; we conservatively ignore conversion and just divide available area
+                available_width = int(available_width / col_count)
+        except Exception:
+            # best-effort; ignore and use full page available width
+            pass
+
+        # Open image and compute target width in inches
+        with Image.open(img_path) as img:
+            img_width_px, img_height_px = img.size
+            dpi = self.config.get('dpi', 300)
+            if dpi <= 0:
+                dpi = 300
+            # width in inches
+            img_width_in = img_width_px / dpi
+            img_height_in = img_height_px / dpi
+
+        # convert available_width (docx dimensions are in EMU) to inches: EMU per inch = 914400
+        emu_per_inch = 914400
+        avail_in_inch = available_width / emu_per_inch
+
+        # target width in inches is min(img width, available width)
+        target_width_in = min(img_width_in, avail_in_inch)
+
+        # Insert with python-docx using Inches
+        doc.add_picture(img_path, width=Inches(target_width_in))
 
 if __name__ == "__main__":
     root = TkinterDnD.Tk()  
